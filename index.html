@@ -290,9 +290,9 @@
 
     const STREAM_FPS = 12;
     const FRAME_INTERVAL_MS = Math.round(1000 / STREAM_FPS);
-    const TEXT_TARGET_MIN_FRAMES = 12;
-    const TEXT_MAX_CHUNK_SIZE = 8;
-    const FILE_CHUNK_SIZE = 180;
+    const TEXT_TARGET_MIN_FRAMES = 24;
+    const TEXT_MAX_CHUNK_SIZE = 4;
+    const FILE_CHUNK_SIZE = 128;
     const JSQR_LOCAL_PATH = 'vendor/jsQR.js';
     const JSQR_CDN_PATH = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
     let frameData = [];
@@ -312,6 +312,25 @@
       if (bytes < 1024) return `${bytes} B`;
       if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
       return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function createTransferId() {
+      const random = crypto.getRandomValues(new Uint8Array(8));
+      return Array.from(random).map((byte) => byte.toString(36).padStart(2, '0')).join('').slice(0, 12);
+    }
+
+    function createFrameSalt() {
+      const random = crypto.getRandomValues(new Uint8Array(6));
+      return Array.from(random).map((byte) => byte.toString(36).padStart(2, '0')).join('');
+    }
+
+    function getFrameMeta(index, totalFrames) {
+      return {
+        frameSalt: createFrameSalt(),
+        frameIndex: index,
+        totalFrames,
+        timestamp: Date.now()
+      };
     }
 
     function stopSendTimer() {
@@ -464,7 +483,8 @@
     }
 
     function buildFrames(payloadType, payload) {
-      const transferId = Math.random().toString(36).slice(2, 10);
+      const transferId = createTransferId();
+      const transferSalt = createFrameSalt();
       let raw;
       let payloadEncoding = 'raw';
       if (payloadType === 'text') {
@@ -476,6 +496,7 @@
       const chunks = chunkString(raw, getChunkSize(payloadType, raw.length));
       return chunks.map((chunk, index) => JSON.stringify({
         transferId,
+        transferSalt,
         payloadType,
         payloadEncoding,
         index,
@@ -483,6 +504,7 @@
         fileName: payload.fileName || '',
         fileSize: payload.fileSize || 0,
         fileMime: payload.fileMime || '',
+        ...getFrameMeta(index, chunks.length),
         chunk
       }));
     }
@@ -572,8 +594,8 @@
         jsQRDecoder = window.jsQR;
         return true;
       }
+      updateReceiveStatus('Loading QR fallback decoder...', false);
       try {
-        updateReceiveStatus('Loading QR fallback decoder...', false);
         await loadScript(JSQR_LOCAL_PATH);
         jsQRDecoder = window.jsQR || jsQR;
       } catch (err) {
@@ -715,9 +737,23 @@
     async function scanFrame() {
       if (!scanningActive) return;
       if (videoElement.readyState >= 2) {
-        scanCanvas.width = videoElement.videoWidth;
-        scanCanvas.height = videoElement.videoHeight;
-        scanCtx.drawImage(videoElement, 0, 0, scanCanvas.width, scanCanvas.height);
+        const maxScanWidth = 720;
+        const maxScanHeight = 720;
+        const aspectRatio = videoElement.videoWidth / videoElement.videoHeight;
+        let drawWidth = videoElement.videoWidth;
+        let drawHeight = videoElement.videoHeight;
+        if (drawWidth > maxScanWidth) {
+          drawWidth = maxScanWidth;
+          drawHeight = Math.round(drawWidth / aspectRatio);
+        }
+        if (drawHeight > maxScanHeight) {
+          drawHeight = maxScanHeight;
+          drawWidth = Math.round(drawHeight * aspectRatio);
+        }
+        scanCanvas.width = drawWidth;
+        scanCanvas.height = drawHeight;
+        scanCtx.drawImage(videoElement, 0, 0, drawWidth, drawHeight);
+
         let scannedValue = null;
         if (barcodeDetector) {
           try {
@@ -1047,7 +1083,27 @@
       getDataCount:function(typeNumber,errorCorrectLevel){ return this.getRSBlocks(typeNumber,errorCorrectLevel).reduce((sum,block)=>sum+block.dataCount,0); }
     };
     function QRRSBlockEntry(totalCount,dataCount){ this.totalCount=totalCount; this.dataCount=dataCount; }
-    function drawQRCode(text){ const qr=qrcode(0,QRErrorCorrectLevel.L); qr.addData(text); qr.make(); const ctx=qrCanvas.getContext('2d'); const moduleCount=qr.getModuleCount(); const tileSize=Math.floor(qrCanvas.width/moduleCount); ctx.fillStyle='#fff'; ctx.fillRect(0,0,qrCanvas.width,qrCanvas.height); ctx.fillStyle='#0f172a'; for(let row=0;row<moduleCount;row++){ for(let col=0;col<moduleCount;col++){ if(qr.isDark(row,col)) ctx.fillRect(col*tileSize,row*tileSize,tileSize,tileSize); } } }
+    function drawQRCode(text){
+      const qr = qrcode(0, QRErrorCorrectLevel.L);
+      qr.addData(text);
+      qr.make();
+      const ctx = qrCanvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      const moduleCount = qr.getModuleCount();
+      const tileSize = Math.floor(qrCanvas.width / moduleCount) || 1;
+      const actualSize = tileSize * moduleCount;
+      const offset = Math.floor((qrCanvas.width - actualSize) / 2);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, qrCanvas.width, qrCanvas.height);
+      ctx.fillStyle = '#0f172a';
+      for (let row = 0; row < moduleCount; row++) {
+        for (let col = 0; col < moduleCount; col++) {
+          if (qr.isDark(row, col)) {
+            ctx.fillRect(offset + col * tileSize, offset + row * tileSize, tileSize, tileSize);
+          }
+        }
+      }
+    }
   </script>
 </body>
 </html>
