@@ -199,6 +199,7 @@
       }
     }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 </head>
 <body>
   <header>
@@ -288,11 +289,12 @@
     const receiveProgress = document.getElementById('receiveProgress');
     const receiveOutput = document.getElementById('receiveOutput');
 
-    const STREAM_FPS = 12;
+    const STREAM_FPS = 8;
     const FRAME_INTERVAL_MS = Math.round(1000 / STREAM_FPS);
     const TEXT_TARGET_MIN_FRAMES = 24;
-    const TEXT_MAX_CHUNK_SIZE = 4;
-    const FILE_CHUNK_SIZE = 128;
+    const TEXT_MAX_CHUNK_SIZE = 3;
+    const FILE_CHUNK_SIZE = 64;
+    const QR_CANVAS_SIZE = 640;
     const JSQR_LOCAL_PATH = 'vendor/jsQR.js';
     const JSQR_CDN_PATH = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
     let frameData = [];
@@ -307,6 +309,8 @@
     let receiveState = null;
     const scanCanvas = document.createElement('canvas');
     const scanCtx = scanCanvas.getContext('2d');
+    qrCanvas.width = QR_CANVAS_SIZE;
+    qrCanvas.height = QR_CANVAS_SIZE;
 
     function formatFileSize(bytes) {
       if (bytes < 1024) return `${bytes} B`;
@@ -614,7 +618,13 @@
     }
 
     async function ensureDecoderAvailable() {
-      if (barcodeDetector) return true;
+      if (jsQRDecoder) return true;
+      if (typeof jsQR === 'function' || typeof window.jsQR === 'function') {
+        jsQRDecoder = window.jsQR || jsQR;
+        return true;
+      }
+      const fallbackOk = await ensureJsQRFallback();
+      if (fallbackOk) return true;
       if ('BarcodeDetector' in window) {
         try {
           if (typeof BarcodeDetector.getSupportedFormats === 'function') {
@@ -622,18 +632,20 @@
             if (!formats.includes('qr_code')) throw new Error('QR format unsupported');
           }
           barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] });
+          console.log('BarcodeDetector available');
           return true;
         } catch (err) {
           console.warn('BarcodeDetector initialization failed:', err);
           barcodeDetector = null;
         }
       }
-      return ensureJsQRFallback();
+      return false;
     }
 
     function updateReceiveStatus(text, warning = false) {
       receiveStatus.textContent = text;
       receiveStatus.classList.toggle('warning', warning);
+      console.log('ReceiveStatus:', text);
     }
 
     function resetReceiveState() {
@@ -650,6 +662,7 @@
       };
       receiveOutput.textContent = 'No data yet.';
       receiveProgress.style.width = '0%';
+      console.log('Receive state reset');
     }
 
     function assembleReceiveOutput() {
@@ -709,6 +722,8 @@
         const errMessage = err && err.name ? err.name : err && err.message ? err.message : String(err);
         return updateReceiveStatus('Camera failed: ' + errMessage, true);
       }
+      videoElement.playsInline = true;
+      videoElement.setAttribute('playsinline', '');
       videoElement.srcObject = videoStream;
       videoElement.classList.remove('hidden');
       try {
@@ -730,6 +745,11 @@
         };
         videoElement.addEventListener('loadedmetadata', onReady);
         videoElement.addEventListener('canplay', onReady);
+        setTimeout(() => {
+          if (checkReady()) return;
+          console.warn('Camera stream did not become ready in time:', videoElement.readyState, videoElement.videoWidth, videoElement.videoHeight);
+          resolve();
+        }, 2500);
       });
       scanningActive = true;
       startScanButton.disabled = true;
@@ -777,7 +797,22 @@
         }
 
         let scannedValue = null;
-        if (barcodeDetector) {
+        if (!jsQRDecoder) {
+          const ok = await ensureJsQRFallback();
+          if (!ok) {
+            updateReceiveStatus('Failed to load jsQR fallback decoder.', true);
+          }
+        }
+        if (jsQRDecoder && scanCanvas.width > 0 && scanCanvas.height > 0) {
+          try {
+            const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+            const result = jsQRDecoder(imageData.data, scanCanvas.width, scanCanvas.height);
+            if (result && result.data) scannedValue = result.data;
+          } catch (err) {
+            console.warn('jsQR scan error:', err);
+          }
+        }
+        if (!scannedValue && barcodeDetector) {
           try {
             const barcodes = await barcodeDetector.detect(videoElement);
             if (barcodes.length) scannedValue = barcodes[0].rawValue;
@@ -789,20 +824,6 @@
               console.warn('BarcodeDetector scan failed, falling back to jsQR:', err, innerErr);
             }
             barcodeDetector = null;
-          }
-        }
-        if (!scannedValue) {
-          if (!jsQRDecoder) {
-            await ensureJsQRFallback();
-          }
-          if (jsQRDecoder && scanCanvas.width > 0 && scanCanvas.height > 0) {
-            try {
-              const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
-              const result = jsQRDecoder(imageData.data, scanCanvas.width, scanCanvas.height);
-              if (result && result.data) scannedValue = result.data;
-            } catch (err) {
-              console.warn('jsQR scan error:', err);
-            }
           }
         }
         if (scannedValue) {
