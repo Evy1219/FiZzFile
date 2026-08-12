@@ -711,6 +711,26 @@
       }
       videoElement.srcObject = videoStream;
       videoElement.classList.remove('hidden');
+      try {
+        await videoElement.play();
+      } catch (playErr) {
+        console.warn('Video play() failed on startScan:', playErr);
+      }
+      await new Promise((resolve) => {
+        const checkReady = () => videoElement.readyState >= 2 && videoElement.videoWidth && videoElement.videoHeight;
+        if (checkReady()) {
+          return resolve();
+        }
+        const onReady = () => {
+          if (checkReady()) {
+            videoElement.removeEventListener('loadedmetadata', onReady);
+            videoElement.removeEventListener('canplay', onReady);
+            resolve();
+          }
+        };
+        videoElement.addEventListener('loadedmetadata', onReady);
+        videoElement.addEventListener('canplay', onReady);
+      });
       scanningActive = true;
       startScanButton.disabled = true;
       stopScanButton.disabled = false;
@@ -736,7 +756,7 @@
 
     async function scanFrame() {
       if (!scanningActive) return;
-      if (videoElement.readyState >= 2) {
+      if (videoElement.readyState >= 2 && videoElement.videoWidth && videoElement.videoHeight) {
         const maxScanWidth = 720;
         const maxScanHeight = 720;
         const aspectRatio = videoElement.videoWidth / videoElement.videoHeight;
@@ -750,17 +770,24 @@
           drawHeight = maxScanHeight;
           drawWidth = Math.round(drawHeight * aspectRatio);
         }
-        scanCanvas.width = drawWidth;
-        scanCanvas.height = drawHeight;
-        scanCtx.drawImage(videoElement, 0, 0, drawWidth, drawHeight);
+        if (drawWidth > 0 && drawHeight > 0) {
+          scanCanvas.width = drawWidth;
+          scanCanvas.height = drawHeight;
+          scanCtx.drawImage(videoElement, 0, 0, drawWidth, drawHeight);
+        }
 
         let scannedValue = null;
         if (barcodeDetector) {
           try {
-            const barcodes = await barcodeDetector.detect(scanCanvas);
+            const barcodes = await barcodeDetector.detect(videoElement);
             if (barcodes.length) scannedValue = barcodes[0].rawValue;
           } catch (err) {
-            console.warn('BarcodeDetector scan failed, falling back to jsQR:', err);
+            try {
+              const barcodes = await barcodeDetector.detect(scanCanvas);
+              if (barcodes.length) scannedValue = barcodes[0].rawValue;
+            } catch (innerErr) {
+              console.warn('BarcodeDetector scan failed, falling back to jsQR:', err, innerErr);
+            }
             barcodeDetector = null;
           }
         }
@@ -768,7 +795,7 @@
           if (!jsQRDecoder) {
             await ensureJsQRFallback();
           }
-          if (jsQRDecoder) {
+          if (jsQRDecoder && scanCanvas.width > 0 && scanCanvas.height > 0) {
             try {
               const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
               const result = jsQRDecoder(imageData.data, scanCanvas.width, scanCanvas.height);
