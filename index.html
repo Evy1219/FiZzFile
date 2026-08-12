@@ -286,7 +286,7 @@
     const receiveOutput = document.getElementById('receiveOutput');
 
     const FRAME_INTERVAL_MS = 1600;
-    const CHUNK_SIZE = 480;
+    const CHUNK_SIZE = 240;
     let frameData = [];
     let activeFrame = 0;
     let sendTimer = null;
@@ -415,7 +415,12 @@
 
     function renderCurrentFrame() {
       if (!frameData.length) { clearCanvas(); return; }
-      drawQRCode(frameData[activeFrame]);
+      try {
+        drawQRCode(frameData[activeFrame]);
+      } catch (err) {
+        clearCanvas();
+        return setSendStatus('QR generation failed: ' + err.message, true);
+      }
       setSendStatus(`Frame ${activeFrame + 1} of ${frameData.length}. Scan this frame now.`);
       updateSendProgress();
     }
