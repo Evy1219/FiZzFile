@@ -243,7 +243,7 @@
       </div>
       <div class="status" id="sendStatus">No transfer prepared.</div>
       <div class="progress"><div id="sendProgress"></div></div>
-      <div class="note">Use another device in Receive mode and point its camera at this screen. QR frames advance one by one.</div>
+      <div class="note">Use another device in Receive mode and point its camera at this screen. QR frames stream rapidly and repeat until the receiver catches them.</div>
     </section>
 
     <section id="receivePanel" class="card hidden">
@@ -288,8 +288,11 @@
     const receiveProgress = document.getElementById('receiveProgress');
     const receiveOutput = document.getElementById('receiveOutput');
 
-    const FRAME_INTERVAL_MS = 1600;
-    const CHUNK_SIZE = 240;
+    const STREAM_FPS = 12;
+    const FRAME_INTERVAL_MS = Math.round(1000 / STREAM_FPS);
+    const TEXT_TARGET_MIN_FRAMES = 12;
+    const TEXT_MAX_CHUNK_SIZE = 8;
+    const FILE_CHUNK_SIZE = 180;
     let frameData = [];
     let activeFrame = 0;
     let sendTimer = null;
@@ -385,12 +388,36 @@
       return bytes;
     }
 
+    function textToBase64(value) {
+      return toBase64(new TextEncoder().encode(value));
+    }
+
+    function base64ToText(value) {
+      return new TextDecoder().decode(fromBase64(value));
+    }
+
     function chunkString(value, size) {
+      if (value.length === 0) return [''];
       const chunks = [];
       for (let i = 0; i < value.length; i += size) {
         chunks.push(value.slice(i, i + size));
       }
       return chunks;
+    }
+
+    function getChunkSize(payloadType, rawLength) {
+      if (payloadType === 'file') return FILE_CHUNK_SIZE;
+      return Math.max(1, Math.min(TEXT_MAX_CHUNK_SIZE, Math.ceil(rawLength / TEXT_TARGET_MIN_FRAMES)));
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[char]));
     }
 
     function setSendStatus(text, warning = false) {
@@ -426,7 +453,7 @@
         setSendControls(false);
         return;
       }
-      setSendStatus(`Prepared ${frameData.length} QR frame(s). Ready to start.`);
+      setSendStatus(`Prepared ${frameData.length} QR frame(s). High-speed stream is ${STREAM_FPS} FPS.`);
       updateSendProgress();
       startButton.disabled = false;
       pauseButton.disabled = true;
@@ -436,12 +463,18 @@
     function buildFrames(payloadType, payload) {
       const transferId = Math.random().toString(36).slice(2, 10);
       let raw;
-      if (payloadType === 'text') raw = payload.text;
-      else raw = payload.base64;
-      const chunks = chunkString(raw, CHUNK_SIZE);
+      let payloadEncoding = 'raw';
+      if (payloadType === 'text') {
+        raw = textToBase64(payload.text);
+        payloadEncoding = 'base64';
+      } else {
+        raw = payload.base64;
+      }
+      const chunks = chunkString(raw, getChunkSize(payloadType, raw.length));
       return chunks.map((chunk, index) => JSON.stringify({
         transferId,
         payloadType,
+        payloadEncoding,
         index,
         totalFrames: chunks.length,
         fileName: payload.fileName || '',
@@ -470,7 +503,7 @@
         setSendStatus('QR generation failed: ' + err.message, true);
         return false;
       }
-      setSendStatus(`Frame ${activeFrame + 1} of ${frameData.length}. Scan this frame now.`);
+      setSendStatus(`Streaming frame ${activeFrame + 1} of ${frameData.length} at ${STREAM_FPS} FPS.`);
       updateSendProgress();
       return true;
     }
@@ -487,7 +520,7 @@
         if (activeFrame >= frameData.length) activeFrame = 0;
         if (!renderCurrentFrame()) stopSending();
       }, FRAME_INTERVAL_MS);
-      setSendStatus('Sending started. QR frames will rotate automatically.');
+      setSendStatus(`High-speed QR stream running at ${STREAM_FPS} FPS. Keep the receiver camera on this screen.`);
     }
 
     function pauseSending() {
@@ -497,7 +530,7 @@
       sendTimer = null;
       startButton.disabled = false;
       pauseButton.disabled = true;
-      setSendStatus('Paused. Resume when ready.');
+      setSendStatus('Paused. Resume the high-speed stream when ready.');
     }
 
     function stopSending() {
@@ -528,6 +561,7 @@
       receiveState = {
         transferId: null,
         payloadType: null,
+        payloadEncoding: 'raw',
         fileName: '',
         fileSize: 0,
         fileMime: '',
@@ -545,17 +579,27 @@
         .map((key) => receiveState.receivedChunks[key])
         .join('');
       if (receiveState.payloadType === 'text') {
-        const possibleUrl = parseUrl(ordered);
+        let receivedText = ordered;
+        if (receiveState.payloadEncoding === 'base64') {
+          try {
+            receivedText = base64ToText(ordered);
+          } catch (err) {
+            receiveOutput.textContent = ordered;
+            return updateReceiveStatus('Transfer complete, but text decoding failed.', true);
+          }
+        }
+        const possibleUrl = parseUrl(receivedText);
         if (possibleUrl) {
-          receiveOutput.innerHTML = `<div>Received link/text:</div><div style="margin-top:12px;font-weight:700;">${ordered}</div><div style="margin-top:14px;"><a href="${possibleUrl}" target="_blank" rel="noreferrer" style="color:#7dd3fc;">Open link</a></div>`;
+          receiveOutput.innerHTML = `<div>Received link/text:</div><div style="margin-top:12px;font-weight:700;">${escapeHtml(receivedText)}</div><div style="margin-top:14px;"><a href="${escapeHtml(possibleUrl)}" target="_blank" rel="noreferrer" style="color:#7dd3fc;">Open link</a></div>`;
         } else {
-          receiveOutput.textContent = ordered;
+          receiveOutput.textContent = receivedText;
         }
       } else {
         const bytes = fromBase64(ordered);
         const blob = new Blob([bytes], { type: receiveState.fileMime || 'application/octet-stream' });
         const url = URL.createObjectURL(blob);
-        receiveOutput.innerHTML = `<div>Received file:</div><div style="margin-top:12px;font-weight:700;">${receiveState.fileName || 'download.bin'}</div><div class="note" style="margin-top:8px;">Size: ${receiveState.fileSize} bytes</div><div style="margin-top:14px;"><a href="${url}" download="${receiveState.fileName || 'download.bin'}" style="color:#7dd3fc;">Download file</a></div>`;
+        const fileName = receiveState.fileName || 'download.bin';
+        receiveOutput.innerHTML = `<div>Received file:</div><div style="margin-top:12px;font-weight:700;">${escapeHtml(fileName)}</div><div class="note" style="margin-top:8px;">Size: ${receiveState.fileSize} bytes</div><div style="margin-top:14px;"><a href="${escapeHtml(url)}" download="${escapeHtml(fileName)}" style="color:#7dd3fc;">Download file</a></div>`;
       }
     }
 
@@ -622,6 +666,7 @@
       if (!receiveState.transferId) {
         receiveState.transferId = frame.transferId;
         receiveState.payloadType = frame.payloadType;
+        receiveState.payloadEncoding = frame.payloadEncoding || 'raw';
         receiveState.fileName = frame.fileName || '';
         receiveState.fileSize = frame.fileSize || 0;
         receiveState.fileMime = frame.fileMime || '';
