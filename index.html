@@ -546,10 +546,17 @@
     async function ensureBarcodeDetector() {
       if (barcodeDetector) return true;
       if (!('BarcodeDetector' in window)) return false;
-      const formats = await BarcodeDetector.getSupportedFormats();
-      if (!formats.includes('qr_code')) return false;
-      barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] });
-      return true;
+      try {
+        if (typeof BarcodeDetector.getSupportedFormats === 'function') {
+          const formats = await BarcodeDetector.getSupportedFormats();
+          if (!formats.includes('qr_code')) return false;
+        }
+        barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] });
+        return true;
+      } catch (err) {
+        console.warn('BarcodeDetector initialization failed:', err);
+        return false;
+      }
     }
 
     function updateReceiveStatus(text, warning = false) {
