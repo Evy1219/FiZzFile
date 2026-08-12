@@ -259,7 +259,7 @@
         <label>Received output</label>
         <div class="output" id="receiveOutput">No data yet.</div>
       </div>
-      <p class="note">Scan the sender display until the transfer completes. The page assembles the full payload automatically.</p>
+      <p class="note">Scan the sender display until the transfer completes. If camera access fails on phone Chrome, avoid file:// and use a local server or HTTPS page instead.</p>
     </section>
   </div>
 
@@ -608,6 +608,18 @@
     }
 
     async function startScan() {
+      const isFileProtocol = location.protocol === 'file:';
+      const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+      const isSecure = location.protocol === 'https:' || isLocalhost;
+      if (!isSecure) {
+        const warning = isFileProtocol
+          ? 'File:// pages may block camera access in Chrome mobile. Serve the page over HTTP/HTTPS or use localhost instead.'
+          : 'Camera access requires a secure context (HTTPS or localhost). Use a local server or serve via HTTPS.';
+        return updateReceiveStatus(warning, true);
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return updateReceiveStatus('Browser does not support camera access. Update Chrome or use a different browser.', true);
+      }
       const supported = await ensureBarcodeDetector();
       if (!supported) {
         return updateReceiveStatus('This browser does not support BarcodeDetector with QR codes. Use Chrome or Edge.', true);
@@ -615,7 +627,8 @@
       try {
         videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
       } catch (err) {
-        return updateReceiveStatus('Camera permission denied or unavailable.', true);
+        const errMessage = err && err.name ? err.name : err && err.message ? err.message : String(err);
+        return updateReceiveStatus('Camera failed: ' + errMessage, true);
       }
       videoElement.srcObject = videoStream;
       videoElement.classList.remove('hidden');
