@@ -293,6 +293,8 @@
     const TEXT_TARGET_MIN_FRAMES = 12;
     const TEXT_MAX_CHUNK_SIZE = 8;
     const FILE_CHUNK_SIZE = 180;
+    const JSQR_LOCAL_PATH = 'vendor/jsQR.js';
+    const JSQR_CDN_PATH = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
     let frameData = [];
     let activeFrame = 0;
     let sendTimer = null;
@@ -301,6 +303,7 @@
     let videoStream = null;
     let scanningActive = false;
     let barcodeDetector = null;
+    let jsQRDecoder = null;
     let receiveState = null;
     const scanCanvas = document.createElement('canvas');
     const scanCtx = scanCanvas.getContext('2d');
@@ -543,20 +546,67 @@
       stopButton.disabled = true;
     }
 
-    async function ensureBarcodeDetector() {
-      if (barcodeDetector) return true;
-      if (!('BarcodeDetector' in window)) return false;
-      try {
-        if (typeof BarcodeDetector.getSupportedFormats === 'function') {
-          const formats = await BarcodeDetector.getSupportedFormats();
-          if (!formats.includes('qr_code')) return false;
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[src="${src}"]`);
+        if (existing) {
+          existing.addEventListener('load', () => resolve());
+          existing.addEventListener('error', () => reject(new Error('Failed to load ' + src)));
+          return;
         }
-        barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] });
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('Failed to load ' + src));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function ensureJsQRFallback() {
+      if (jsQRDecoder) return true;
+      if (typeof jsQR === 'function') {
+        jsQRDecoder = jsQR;
         return true;
-      } catch (err) {
-        console.warn('BarcodeDetector initialization failed:', err);
-        return false;
       }
+      if (typeof window.jsQR === 'function') {
+        jsQRDecoder = window.jsQR;
+        return true;
+      }
+      try {
+        updateReceiveStatus('Loading QR fallback decoder...', false);
+        await loadScript(JSQR_LOCAL_PATH);
+        jsQRDecoder = window.jsQR || jsQR;
+      } catch (err) {
+        console.warn('Failed to load local jsQR fallback:', err);
+      }
+      if (!jsQRDecoder) {
+        try {
+          await loadScript(JSQR_CDN_PATH);
+          jsQRDecoder = window.jsQR || jsQR;
+        } catch (err) {
+          console.warn('Failed to load CDN jsQR fallback:', err);
+          return false;
+        }
+      }
+      return typeof jsQRDecoder === 'function';
+    }
+
+    async function ensureDecoderAvailable() {
+      if (barcodeDetector) return true;
+      if ('BarcodeDetector' in window) {
+        try {
+          if (typeof BarcodeDetector.getSupportedFormats === 'function') {
+            const formats = await BarcodeDetector.getSupportedFormats();
+            if (!formats.includes('qr_code')) throw new Error('QR format unsupported');
+          }
+          barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] });
+          return true;
+        } catch (err) {
+          console.warn('BarcodeDetector initialization failed:', err);
+          barcodeDetector = null;
+        }
+      }
+      return ensureJsQRFallback();
     }
 
     function updateReceiveStatus(text, warning = false) {
@@ -627,9 +677,9 @@
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         return updateReceiveStatus('Browser does not support camera access. Update Chrome or use a different browser.', true);
       }
-      const supported = await ensureBarcodeDetector();
+      const supported = await ensureDecoderAvailable();
       if (!supported) {
-        return updateReceiveStatus('This browser does not support BarcodeDetector with QR codes. Use Chrome or Edge.', true);
+        return updateReceiveStatus('This browser does not support QR decoding via BarcodeDetector or jsQR fallback. Use Chrome/Edge or enable network access to load the fallback decoder.', true);
       }
       try {
         videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
@@ -668,11 +718,32 @@
         scanCanvas.width = videoElement.videoWidth;
         scanCanvas.height = videoElement.videoHeight;
         scanCtx.drawImage(videoElement, 0, 0, scanCanvas.width, scanCanvas.height);
-        try {
-          const barcodes = await barcodeDetector.detect(scanCanvas);
-          if (barcodes.length) processScanned(barcodes[0].rawValue);
-        } catch (err) {
-          updateReceiveStatus('Scan error: ' + err.message, true);
+        let scannedValue = null;
+        if (barcodeDetector) {
+          try {
+            const barcodes = await barcodeDetector.detect(scanCanvas);
+            if (barcodes.length) scannedValue = barcodes[0].rawValue;
+          } catch (err) {
+            console.warn('BarcodeDetector scan failed, falling back to jsQR:', err);
+            barcodeDetector = null;
+          }
+        }
+        if (!scannedValue) {
+          if (!jsQRDecoder) {
+            await ensureJsQRFallback();
+          }
+          if (jsQRDecoder) {
+            try {
+              const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+              const result = jsQRDecoder(imageData.data, scanCanvas.width, scanCanvas.height);
+              if (result && result.data) scannedValue = result.data;
+            } catch (err) {
+              console.warn('jsQR scan error:', err);
+            }
+          }
+        }
+        if (scannedValue) {
+          processScanned(scannedValue);
         }
       }
       requestAnimationFrame(scanFrame);
