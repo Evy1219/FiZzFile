@@ -249,10 +249,12 @@
 
     <section id="receivePanel" class="card hidden">
       <h2>Receive</h2>
-      <div class="field">
+      <div class="field small-button-row">
         <button id="startScanButton" class="primary">Start camera scan</button>
         <button id="stopScanButton" class="secondary" disabled>Stop camera</button>
+        <button id="uploadScanButton" class="secondary">Upload scan image</button>
       </div>
+      <input type="file" id="scanImageInput" accept="image/*" capture="environment" class="hidden" />
       <video id="videoElement" class="receiver-video hidden" autoplay muted playsinline></video>
       <div class="status" id="receiveStatus">Camera is stopped.</div>
       <div class="progress"><div id="receiveProgress"></div></div>
@@ -284,6 +286,8 @@
     const receivePanel = document.getElementById('receivePanel');
     const startScanButton = document.getElementById('startScanButton');
     const stopScanButton = document.getElementById('stopScanButton');
+    const uploadScanButton = document.getElementById('uploadScanButton');
+    const scanImageInput = document.getElementById('scanImageInput');
     const videoElement = document.getElementById('videoElement');
     const receiveStatus = document.getElementById('receiveStatus');
     const receiveProgress = document.getElementById('receiveProgress');
@@ -311,6 +315,59 @@
     const scanCtx = scanCanvas.getContext('2d');
     qrCanvas.width = QR_CANVAS_SIZE;
     qrCanvas.height = QR_CANVAS_SIZE;
+
+    function decodeQrFromImageData(imageData) {
+      if (!imageData || !imageData.data) return null;
+      if (!jsQRDecoder) return null;
+      try {
+        const result = jsQRDecoder(imageData.data, imageData.width, imageData.height);
+        return result && result.data ? result.data : null;
+      } catch (err) {
+        console.warn('jsQR decode failed:', err);
+        return null;
+      }
+    }
+
+    async function scanImageFile(file) {
+      if (!file) return updateReceiveStatus('No image selected for upload.', true);
+      if (!jsQRDecoder) {
+        const ok = await ensureJsQRFallback();
+        if (!ok) return updateReceiveStatus('Unable to load QR decoder for image scan.', true);
+      }
+      const image = new Image();
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = reject;
+        image.src = dataUrl;
+      });
+      const scale = Math.min(1, 1280 / Math.max(image.naturalWidth, image.naturalHeight));
+      const width = Math.max(320, Math.round(image.naturalWidth * scale));
+      const height = Math.max(320, Math.round(image.naturalHeight * scale));
+      scanCanvas.width = width;
+      scanCanvas.height = height;
+      scanCtx.drawImage(image, 0, 0, width, height);
+      const imageData = scanCtx.getImageData(0, 0, width, height);
+      let scannedValue = decodeQrFromImageData(imageData);
+      if (!scannedValue && barcodeDetector) {
+        try {
+          const barcodes = await barcodeDetector.detect(scanCanvas);
+          if (barcodes.length) scannedValue = barcodes[0].rawValue;
+        } catch (err) {
+          console.warn('BarcodeDetector image scan failed:', err);
+        }
+      }
+      if (scannedValue) {
+        processScanned(scannedValue);
+      } else {
+        updateReceiveStatus('No QR code found in the uploaded image. Try a clearer photo or different angle.', true);
+      }
+    }
 
     function formatFileSize(bytes) {
       if (bytes < 1024) return `${bytes} B`;
@@ -600,19 +657,11 @@
       }
       updateReceiveStatus('Loading QR fallback decoder...', false);
       try {
-        await loadScript(JSQR_LOCAL_PATH);
+        await loadScript(JSQR_CDN_PATH);
         jsQRDecoder = window.jsQR || jsQR;
       } catch (err) {
-        console.warn('Failed to load local jsQR fallback:', err);
-      }
-      if (!jsQRDecoder) {
-        try {
-          await loadScript(JSQR_CDN_PATH);
-          jsQRDecoder = window.jsQR || jsQR;
-        } catch (err) {
-          console.warn('Failed to load CDN jsQR fallback:', err);
-          return false;
-        }
+        console.warn('Failed to load CDN jsQR fallback:', err);
+        return false;
       }
       return typeof jsQRDecoder === 'function';
     }
@@ -866,6 +915,13 @@
     stopButton.addEventListener('click', stopSending);
     startScanButton.addEventListener('click', startScan);
     stopScanButton.addEventListener('click', stopScan);
+    uploadScanButton.addEventListener('click', () => scanImageInput.click());
+    scanImageInput.addEventListener('change', async () => {
+      if (scanImageInput.files.length) {
+        await scanImageFile(scanImageInput.files[0]);
+      }
+      scanImageInput.value = '';
+    });
 
     setTab('send');
     resetReceiveState();
